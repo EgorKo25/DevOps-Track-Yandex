@@ -1,13 +1,18 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"strconv"
+	"time"
 
+	"github.com/EgorKo25/DevOps-Track-Yandex/internal/database"
+	"github.com/EgorKo25/DevOps-Track-Yandex/internal/hashing"
 	"github.com/EgorKo25/DevOps-Track-Yandex/internal/middleware"
 	"github.com/EgorKo25/DevOps-Track-Yandex/internal/storage"
 
@@ -17,18 +22,37 @@ import (
 type Handler struct {
 	storage    *storage.MetricStorage
 	compressor *middleware.Compressor
+	hasher     *hashing.Hash
+	db         *database.DB
+	ctx        context.Context
 }
 
 // NewHandler handler type constructor
-func NewHandler(storage *storage.MetricStorage, compressor *middleware.Compressor) *Handler {
+func NewHandler(storage *storage.MetricStorage, compressor *middleware.Compressor, hasher *hashing.Hash, db *database.DB, ctx context.Context) *Handler {
 	return &Handler{
 		storage:    storage,
 		compressor: compressor,
+		hasher:     hasher,
+		db:         db,
+		ctx:        ctx,
 	}
 }
 
+// PingDB go dock
+func (h *Handler) PingDB(w http.ResponseWriter, _ *http.Request) {
+
+	ctx, cancel := context.WithTimeout(h.ctx, 3*time.Second)
+	defer cancel()
+
+	if err := h.db.DB.PingContext(ctx); err != nil {
+		log.Println("database didn't open")
+		w.WriteHeader(http.StatusInternalServerError)
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
 // GetValueStat a handler that returns the value of a specific metric
-func (h Handler) GetValueStat(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) GetValueStat(w http.ResponseWriter, r *http.Request) {
 	res := h.storage.StatStatusM(chi.URLParam(r, "name"), chi.URLParam(r, "type"))
 	if res == nil {
 		w.WriteHeader(http.StatusNotFound)
@@ -45,9 +69,10 @@ func (h Handler) GetValueStat(w http.ResponseWriter, r *http.Request) {
 
 }
 
-// GetJSONValue go dock
-func (h Handler) GetJSONValue(w http.ResponseWriter, r *http.Request) {
+// GetJSONValue TODO: go dock
+func (h *Handler) GetJSONValue(w http.ResponseWriter, r *http.Request) {
 
+	var err error
 	var metric storage.Metric
 
 	b, _ := io.ReadAll(r.Body)
@@ -90,9 +115,14 @@ func (h Handler) GetJSONValue(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	if metric.Hash, err = h.hasher.Run(&metric); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
 	dataJSON, err := json.Marshal(metric)
 	if err != nil {
-		log.Println("Failed to serialize")
+		log.Println("failed to serialize!")
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
@@ -101,7 +131,7 @@ func (h Handler) GetJSONValue(w http.ResponseWriter, r *http.Request) {
 
 		dataJSON, err = h.compressor.Compress(dataJSON)
 		if err != nil {
-			log.Println("Failed to compress")
+			log.Println("failed to compress")
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
@@ -116,9 +146,82 @@ func (h Handler) GetJSONValue(w http.ResponseWriter, r *http.Request) {
 
 }
 
-// SetJSONValue go dock
-func (h Handler) SetJSONValue(w http.ResponseWriter, r *http.Request) {
+// GetJSONUpdates TODO: go dock
+func (h *Handler) GetJSONUpdates(w http.ResponseWriter, r *http.Request) {
 
+	var err error
+	var Metrics []storage.Metric
+
+	b, err := io.ReadAll(r.Body)
+	if err != nil {
+
+		log.Println("read request body error!")
+
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	if r.Header.Get("Content-Encoding") == "gzip" {
+
+		b, err = h.compressor.Decompress(b)
+		if err != nil {
+
+			log.Println("field to decompress!")
+
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+	}
+
+	err = json.Unmarshal(b, &Metrics)
+	if err != nil {
+
+		log.Println("unmarshal went wrong!")
+
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	for _, metric := range Metrics {
+
+		if metric.Value == nil && metric.Delta == nil {
+
+			log.Println("no metric value")
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+
+		if metric.Hash, err = h.hasher.Run(&metric); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+
+		h.storage.SetStat(&metric)
+		if err = h.addMetric(&metric); err != nil {
+			log.Println(err)
+		}
+
+	}
+
+	w.WriteHeader(http.StatusOK)
+}
+
+func (h *Handler) addMetric(m *storage.Metric) error {
+	h.db.Buffer = append(h.db.Buffer, *m)
+
+	if cap(h.db.Buffer) == len(h.db.Buffer) {
+		err := h.db.Flush()
+		if err != nil {
+			return errors.New("cannot add records to the database")
+		}
+	}
+	return nil
+}
+
+// SetJSONValue TODO: go dock
+func (h *Handler) SetJSONValue(w http.ResponseWriter, r *http.Request) {
+
+	var err error
 	var metric storage.Metric
 
 	b, _ := io.ReadAll(r.Body)
@@ -132,6 +235,12 @@ func (h Handler) SetJSONValue(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if metric.Value == nil && metric.Delta == nil {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	metric.Hash, err = h.hasher.Run(&metric)
+	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
@@ -171,6 +280,12 @@ func (h Handler) SetJSONValue(w http.ResponseWriter, r *http.Request) {
 
 	}
 
+	if h.db != nil {
+		if err = h.db.Run(&metric); err != nil {
+			log.Println("Error db send ", err)
+		}
+	}
+
 	dataJSON, err := json.Marshal(metric)
 	if err != nil {
 		log.Println("Failed to serialize")
@@ -198,7 +313,7 @@ func (h Handler) SetJSONValue(w http.ResponseWriter, r *http.Request) {
 }
 
 // GetAllStats returns the values of all metrics
-func (h Handler) GetAllStats(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) GetAllStats(w http.ResponseWriter, r *http.Request) {
 
 	var res string
 	var err error
@@ -233,7 +348,7 @@ func (h Handler) GetAllStats(w http.ResponseWriter, r *http.Request) {
 }
 
 // SetMetricValue sets the value of the specified metric
-func (h Handler) SetMetricValue(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) SetMetricValue(w http.ResponseWriter, r *http.Request) {
 
 	var metric storage.Metric
 

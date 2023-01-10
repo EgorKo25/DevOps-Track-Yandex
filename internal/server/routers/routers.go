@@ -13,9 +13,11 @@ func NewRouter(handler *handlers.Handler) chi.Router {
 
 	r.Route("/", func(r chi.Router) {
 		r.Get("/", handler.GetAllStats)
+		r.Get("/ping", handler.PingDB)
 		r.Get("/value/{type}/{name}", handler.GetValueStat)
 		r.Post("/update/{type}/{name}/{value}", handler.SetMetricValue)
 
+		r.Post("/updates/", handler.GetJSONUpdates)
 		r.Post("/update/", handler.SetJSONValue)
 		r.Post("/value/", handler.GetJSONValue)
 

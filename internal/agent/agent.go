@@ -3,6 +3,7 @@ package agent
 import (
 	"bytes"
 	"encoding/json"
+	"github.com/EgorKo25/DevOps-Track-Yandex/internal/hashing"
 	"log"
 	"math/rand"
 	"net/http"
@@ -16,13 +17,15 @@ import (
 
 type Monitor struct {
 	config *config.ConfigurationAgent
+	hasher *hashing.Hash
 
 	pollCount storage.Counter
 }
 
-func NewMonitor(cfg *config.ConfigurationAgent) *Monitor {
+func NewMonitor(cfg *config.ConfigurationAgent, hsr *hashing.Hash) *Monitor {
 	var mon Monitor
 	mon.config = cfg
+	mon.hasher = hsr
 	return &mon
 
 }
@@ -44,6 +47,8 @@ func (m *Monitor) sendData(value storage.Gauge, name, Mtype string) {
 		metric.Value = &value
 
 	}
+
+	metric.Hash, _ = m.hasher.Run(&metric)
 
 	dataJSON, err := json.Marshal(metric)
 	if err != nil {
